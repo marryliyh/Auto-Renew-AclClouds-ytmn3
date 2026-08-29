@@ -6,6 +6,7 @@ import re
 import time
 import requests
 from datetime import datetime, timedelta, timezone
+
 from seleniumbase import SB
 from selenium.common.exceptions import (
     ElementClickInterceptedException,
@@ -17,17 +18,23 @@ from zoneinfo import ZoneInfo
 
 
 # ============================================================
-# 配置（从环境变量读取）
+# 配置
 # ============================================================
 
 EMAIL = os.getenv("EMAIL") or ""
 PASSWORD = os.getenv("PASSWORD") or ""
+
 TG_CHAT_ID = os.getenv("TG_CHAT_ID") or ""
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""
 
-LOGIN_PATH = "/auth/login"
+# 登录入口
 BASE_URL = "https://dash.aclclouds.com"
-PROJECTS_URL = f"{BASE_URL}/dashboard/projects"
+
+LOGIN_PATH = "/auth/login"
+
+# 不再把项目地址写死成 dash.aclclouds.com。
+# 登录成功后会根据实际登录后的域名动态生成。
+PROJECTS_PATH = "/dashboard/projects"
 
 
 # ============================================================
@@ -52,6 +59,7 @@ def beijing_time_str():
 def send_telegram(message):
     if TG_BOT_TOKEN and TG_CHAT_ID:
         url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+
         data = {
             "chat_id": TG_CHAT_ID,
             "text": message,
@@ -63,15 +71,24 @@ def send_telegram(message):
                 data=data,
                 timeout=10,
             )
-            print(f"Telegram sent: {message[:50]}...")
+
+            print(
+                f"Telegram sent: {message[:50]}..."
+            )
+
         except Exception as e:
-            print(f"Failed to send Telegram: {e}")
+            print(
+                f"Failed to send Telegram: {e}"
+            )
+
     else:
-        print(f"[Telegram disabled] {message}")
+        print(
+            f"[Telegram disabled] {message}"
+        )
 
 
 # ============================================================
-# 登录状态
+# URL / 登录状态
 # ============================================================
 
 def wait_for_url_change(sb, original_url, timeout=30):
@@ -86,84 +103,185 @@ def wait_for_url_change(sb, original_url, timeout=30):
         sb.sleep(0.5)
 
     raise Exception(
-        f"等待 URL 变化超时 ({timeout}秒)，当前仍为: {original_url}"
+        f"等待 URL 变化超时 ({timeout}秒)，"
+        f"当前仍为: {original_url}"
     )
 
 
 def is_login_page(sb):
-    return LOGIN_PATH in sb.get_current_url()
+    """
+    判断当前是否仍然处于登录页面。
+    """
+
+    try:
+        current_url = sb.get_current_url().strip().lower()
+    except Exception:
+        return False
+
+    return LOGIN_PATH.lower() in current_url
 
 
-def is_logged_in(sb):
-    current_url = sb.get_current_url()
+def is_aclclouds_url(url):
+    """
+    判断 URL 是否属于 ACLClouds。
 
-    return (
-        current_url.startswith(BASE_URL)
-        and LOGIN_PATH not in current_url
+    支持：
+        aclclouds.com
+        www.aclclouds.com
+        dash.aclclouds.com
+    """
+
+    if not url:
+        return False
+
+    url = url.strip().lower()
+
+    allowed_hosts = (
+        "aclclouds.com",
+        "www.aclclouds.com",
+        "dash.aclclouds.com",
     )
 
-
-def verify_login_success(sb):
-    """
-    登录成功检测。
-
-    不再把页面标题写死为：
-        Home | ACLClouds
-
-    因为网站可能根据语言/地区返回：
-        Home | ACLClouds
-        Accueil | ACLClouds
-
-    这里主要通过：
-    1. 不再位于 /auth/login
-    2. URL 仍属于 ACLClouds
-    3. 页面标题包含 ACLClouds
-
-    来判断登录是否成功。
-    """
-
-    current_url = sb.get_current_url()
-    title = sb.get_title().strip()
-
-    print(f"登录后 URL: {current_url}")
-    print(f"登录后页面标题: {title}")
-
-    # 仍然停留在登录页
-    if LOGIN_PATH in current_url:
-        return False
-
-    # URL 不属于 ACLClouds
-    if not current_url.startswith(BASE_URL):
-        return False
-
-    # 标题包含 ACLClouds，通常可以确认已经进入站点
-    if "ACLClouds" in title:
-        return True
-
-    # 如果标题暂时没有加载完成，再给页面一点时间
-    for _ in range(10):
-        sb.sleep(0.5)
-
-        current_url = sb.get_current_url()
-        title = sb.get_title().strip()
-
+    # 简单防止把 evilaclclouds.com 之类误判
+    for host in allowed_hosts:
         if (
-            LOGIN_PATH not in current_url
-            and current_url.startswith(BASE_URL)
-            and "ACLClouds" in title
+            f"://{host}/" in url
+            or url.endswith(f"://{host}")
+            or f"://{host}?" in url
+            or f"://{host}#" in url
         ):
             return True
-
-    # 即使标题异常，只要已经离开登录页，也继续进行更宽松判断
-    if is_logged_in(sb):
-        print("⚠️ 页面标题未包含 ACLClouds，但 URL 已离开登录页，继续执行。")
-        return True
 
     return False
 
 
+def is_logged_in(sb):
+    """
+    判断是否已经登录。
+
+    重要：
+    不再检查：
+        Home | ACLClouds
+        Accueil | ACLClouds
+
+    也不要求登录后必须是：
+        dash.aclclouds.com
+
+    只要：
+        1. 已经离开 /auth/login
+        2. 当前 URL 属于 ACLClouds
+
+    就认为登录成功。
+    """
+
+    try:
+        current_url = sb.get_current_url().strip()
+    except Exception:
+        return False
+
+    # 还在登录页
+    if LOGIN_PATH.lower() in current_url.lower():
+        return False
+
+    # 已经离开登录页，并且属于 ACLClouds
+    return is_aclclouds_url(current_url)
+
+
+def verify_login_success(sb, timeout=15):
+    """
+    等待并确认登录成功。
+
+    不依赖页面 title。
+    """
+
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+
+        try:
+            current_url = sb.get_current_url().strip()
+        except Exception:
+            current_url = ""
+
+        try:
+            title = sb.get_title().strip()
+        except Exception:
+            title = ""
+
+        print(
+            f"登录状态检查 -> URL: {current_url}"
+        )
+
+        print(
+            f"登录状态检查 -> 标题: {title}"
+        )
+
+        # ----------------------------------------------------
+        # 仍然在登录页面
+        # ----------------------------------------------------
+
+        if LOGIN_PATH.lower() in current_url.lower():
+            sb.sleep(0.5)
+            continue
+
+        # ----------------------------------------------------
+        # 已离开登录页面，并且 URL 属于 ACLClouds
+        # ----------------------------------------------------
+
+        if is_aclclouds_url(current_url):
+            return True
+
+        sb.sleep(0.5)
+
+    return False
+
+
+def get_current_site_base(sb):
+    """
+    根据当前页面 URL 获取实际站点根地址。
+
+    例如：
+
+        https://aclclouds.com/dashboard
+        ->
+        https://aclclouds.com
+
+    或：
+
+        https://dash.aclclouds.com/dashboard
+        ->
+        https://dash.aclclouds.com
+    """
+
+    try:
+        current_url = sb.get_current_url().strip()
+    except Exception:
+        return BASE_URL
+
+    match = re.match(
+        r"^(https?://[^/]+)",
+        current_url,
+        re.I,
+    )
+
+    if match:
+        return match.group(1)
+
+    return BASE_URL
+
+
+def get_projects_url(sb):
+    """
+    根据登录成功后的实际域名进入项目页面。
+    """
+
+    site_base = get_current_site_base(sb)
+
+    return f"{site_base}{PROJECTS_PATH}"
+
+
 # ============================================================
-# 页面元素
+# Selenium 工具
 # ============================================================
 
 def scroll_to_selector(sb, selector):
@@ -173,6 +291,7 @@ def scroll_to_selector(sb, selector):
 
 def safe_click_element(sb, element, label):
     try:
+
         sb.driver.execute_script(
             """
             arguments[0].scrollIntoView({
@@ -196,7 +315,8 @@ def safe_click_element(sb, element, label):
         ) as e:
 
             print(
-                f"{label} 普通点击失败，改用 JavaScript 点击: {e}"
+                f"{label} 普通点击失败，"
+                f"改用 JavaScript 点击: {e}"
             )
 
         sb.driver.execute_script(
@@ -209,9 +329,12 @@ def safe_click_element(sb, element, label):
         return True
 
     except StaleElementReferenceException:
+
         print(
-            f"{label} 元素已失效，点击前需要重新定位"
+            f"{label} 元素已失效，"
+            f"点击前需要重新定位"
         )
+
         return False
 
 
@@ -227,7 +350,12 @@ def unique_elements(elements):
     seen = set()
 
     for element in elements:
-        element_id = getattr(element, "id", None)
+
+        element_id = getattr(
+            element,
+            "id",
+            None,
+        )
 
         if element_id and element_id in seen:
             continue
@@ -245,15 +373,29 @@ def element_contains(parent, child):
         return True
 
     try:
-        descendants = parent.find_elements(
-            By.XPATH,
-            ".//*",
+        return (
+            parent.find_elements(
+                By.XPATH,
+                ".//*",
+            ).count(child)
+            > 0
         )
-
-        return child in descendants
 
     except Exception:
         return False
+
+
+def find_elements(root, selector):
+    by = (
+        By.XPATH
+        if selector.startswith(("/", ".//"))
+        else By.CSS_SELECTOR
+    )
+
+    return root.find_elements(
+        by,
+        selector,
+    )
 
 
 # ============================================================
@@ -261,6 +403,7 @@ def element_contains(parent, child):
 # ============================================================
 
 def dedupe_project_cards(cards):
+
     cards = unique_elements(cards)
 
     if not cards:
@@ -269,6 +412,7 @@ def dedupe_project_cards(cards):
     keep = []
 
     for card in cards:
+
         card_text = element_text(card)
 
         if len(card_text) < 3:
@@ -277,9 +421,11 @@ def dedupe_project_cards(cards):
         duplicate = False
 
         for kept in list(keep):
+
             kept_text = element_text(kept)
 
             if element_contains(kept, card):
+
                 duplicate = True
                 break
 
@@ -287,6 +433,7 @@ def dedupe_project_cards(cards):
 
                 if len(card_text) > len(kept_text):
                     keep.remove(kept)
+
                 else:
                     duplicate = True
 
@@ -296,20 +443,24 @@ def dedupe_project_cards(cards):
             keep.append(card)
 
     deduped = []
+
     seen_signatures = set()
 
     for card in keep:
+
         text = element_text(card)
 
         name = ""
 
         for line in text.splitlines():
+
             line = line.strip()
 
             if (
                 line
                 and not re.search(
-                    r"expires|renewal|renew|reactivate|suspended|expiry|expire|valid|"
+                    r"expires|renewal|renew|reactivate|"
+                    r"suspended|expiry|expire|valid|"
                     r"续期|重新激活|恢复|暂停|过期|到期",
                     line,
                     re.I,
@@ -327,73 +478,56 @@ def dedupe_project_cards(cards):
             continue
 
         seen_signatures.add(signature)
+
         deduped.append(card)
 
     return deduped
 
 
-def find_elements(root, selector):
-    by = (
-        By.XPATH
-        if selector.startswith(("/", ".//"))
-        else By.CSS_SELECTOR
-    )
-
-    return root.find_elements(by, selector)
-
-
 def find_renew_buttons(root):
+
     selectors = [
         ".projects-renew-btn",
 
-        # Renew
         ".//button["
         'contains(translate(@title, '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
-        '"abcdefghijklmnopqrstuvwxyz"), "renew") '
-        "or "
+        '"abcdefghijklmnopqrstuvwxyz"), "renew") or '
         'contains(translate(@aria-label, '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
         '"abcdefghijklmnopqrstuvwxyz"), "renew")'
         "]",
 
-        # Reactivate
         ".//button["
         'contains(translate(@title, '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
-        '"abcdefghijklmnopqrstuvwxyz"), "reactivate") '
-        "or "
+        '"abcdefghijklmnopqrstuvwxyz"), "reactivate") or '
         'contains(translate(@aria-label, '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
         '"abcdefghijklmnopqrstuvwxyz"), "reactivate")'
         "]",
 
-        # 文字 Renew
         ".//button["
         'contains(translate(normalize-space(.), '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
         '"abcdefghijklmnopqrstuvwxyz"), "renew")'
         "]",
 
-        # 文字 Reactivate
         ".//button["
         'contains(translate(normalize-space(.), '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
         '"abcdefghijklmnopqrstuvwxyz"), "reactivate")'
         "]",
 
-        # role button / a
         ".//*["
-        '(@role="button" or self::a) '
-        "and "
+        '(@role="button" or self::a) and '
         'contains(translate(normalize-space(.), '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
         '"abcdefghijklmnopqrstuvwxyz"), "renew")'
         "]",
 
         ".//*["
-        '(@role="button" or self::a) '
-        "and "
+        '(@role="button" or self::a) and '
         'contains(translate(normalize-space(.), '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
         '"abcdefghijklmnopqrstuvwxyz"), "reactivate")'
@@ -403,29 +537,30 @@ def find_renew_buttons(root):
     buttons = []
 
     for selector in selectors:
+
         try:
             buttons.extend(
-                find_elements(root, selector)
+                find_elements(
+                    root,
+                    selector,
+                )
             )
+
         except Exception:
             continue
 
-    result = []
-
-    for button in buttons:
-        try:
-            if (
-                element_text(button)
-                or button.is_displayed()
-            ):
-                result.append(button)
-        except Exception:
-            continue
-
-    return unique_elements(result)
+    return unique_elements(
+        [
+            button
+            for button in buttons
+            if element_text(button)
+            or button.is_displayed()
+        ]
+    )
 
 
 def find_card_container_from_child(sb, child):
+
     return sb.driver.execute_script(
         """
         const start = arguments[0];
@@ -438,17 +573,23 @@ def find_card_container_from_child(sb, child):
             i += 1,
             node = node.parentElement
         ) {
-            const text = (node.innerText || "").trim();
 
-            const cls = (
-                node.className || ""
-            ).toString().toLowerCase();
+            const text =
+                (node.innerText || '').trim();
+
+            const cls =
+                (node.className || '')
+                .toString()
+                .toLowerCase();
 
             const looksLikeProject =
-                /renew|reactivate|suspended|expiry|expire|expires|valid|续期|重新激活|恢复|暂停|过期|到期/i.test(text);
+                /renew|reactivate|suspended|expiry|expire|
+                expires|valid|续期|重新激活|恢复|暂停|过期|到期/i
+                .test(text);
 
             const looksLikeCard =
-                /card|project|service|server|item|row/.test(cls);
+                /card|project|service|server|item|row/
+                .test(cls);
 
             if (
                 node !== start &&
@@ -466,6 +607,7 @@ def find_card_container_from_child(sb, child):
 
 
 def find_project_cards(sb):
+
     candidate_selectors = [
         ".projects-card",
         '[class*="projects-card"]',
@@ -479,33 +621,32 @@ def find_project_cards(sb):
     cards = []
 
     for selector in candidate_selectors:
+
         try:
-            elements = sb.driver.find_elements(
+
+            for card in sb.driver.find_elements(
                 By.CSS_SELECTOR,
                 selector,
-            )
+            ):
 
-            for card in elements:
                 text = element_text(card).lower()
-
-                keywords = [
-                    "renew",
-                    "reactivate",
-                    "suspended",
-                    "expiry",
-                    "expire",
-                    "valid",
-                    "续期",
-                    "重新激活",
-                    "恢复",
-                    "暂停",
-                    "过期",
-                    "到期",
-                ]
 
                 if any(
                     keyword in text
-                    for keyword in keywords
+                    for keyword in [
+                        "renew",
+                        "reactivate",
+                        "suspended",
+                        "expiry",
+                        "expire",
+                        "valid",
+                        "续期",
+                        "重新激活",
+                        "恢复",
+                        "暂停",
+                        "过期",
+                        "到期",
+                    ]
                 ):
                     cards.append(card)
 
@@ -515,8 +656,10 @@ def find_project_cards(sb):
     if cards:
         return dedupe_project_cards(cards)
 
-    # 根据 Renew 按钮反推卡片
-    for button in find_renew_buttons(sb.driver):
+    for button in find_renew_buttons(
+        sb.driver
+    ):
+
         try:
             cards.append(
                 find_card_container_from_child(
@@ -530,7 +673,6 @@ def find_project_cards(sb):
     if cards:
         return dedupe_project_cards(cards)
 
-    # 根据 expiry 文本反推卡片
     expiry_xpath = (
         "//*["
         'contains(translate(normalize-space(.), '
@@ -549,25 +691,21 @@ def find_project_cards(sb):
         "]"
     )
 
-    try:
-        elements = sb.driver.find_elements(
-            By.XPATH,
-            expiry_xpath,
-        )
+    for elem in sb.driver.find_elements(
+        By.XPATH,
+        expiry_xpath,
+    ):
 
-        for elem in elements:
-            try:
-                cards.append(
-                    find_card_container_from_child(
-                        sb,
-                        elem,
-                    )
+        try:
+            cards.append(
+                find_card_container_from_child(
+                    sb,
+                    elem,
                 )
-            except Exception:
-                continue
+            )
 
-    except Exception:
-        pass
+        except Exception:
+            continue
 
     return dedupe_project_cards(cards)
 
@@ -577,6 +715,7 @@ def find_project_cards(sb):
 # ============================================================
 
 def extract_date_like(text):
+
     if not text:
         return ""
 
@@ -589,6 +728,7 @@ def extract_date_like(text):
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
             text,
@@ -601,6 +741,7 @@ def extract_date_like(text):
 
 
 def extract_duration_like(text):
+
     if not text:
         return ""
 
@@ -616,26 +757,27 @@ def extract_duration_like(text):
             r"expires\s+in|剩余|还有",
             line,
             re.I,
-        ):
+        ) and idx + 1 < len(lines):
 
-            if idx + 1 < len(lines):
-                candidate = lines[idx + 1]
+            candidate = lines[idx + 1]
 
-                if (
-                    extract_date_like(candidate)
-                    or re.search(r"\d", candidate)
-                ):
-                    return re.sub(
-                        r"^(?:expires\s*in|剩余|还有)"
-                        r"\s*[:：]?\s*",
-                        "",
-                        candidate,
-                        flags=re.I,
-                    ).strip()
+            if (
+                extract_date_like(candidate)
+                or re.search(r"\d", candidate)
+            ):
+
+                return re.sub(
+                    r"^(?:expires\s*in|剩余|还有)"
+                    r"\s*[:：]?\s*",
+                    "",
+                    candidate,
+                    flags=re.I,
+                ).strip()
 
     match = re.search(
         r"(?:expires\s*in\s*)?"
-        r"(\d+\s*(?:days|day|d|j|天|日)"
+        r"(\d+\s*"
+        r"(?:days|day|d|j|天|日)"
         r"\s*\d*\s*"
         r"(?:hours|hour|h|小时)?)",
         text,
@@ -646,7 +788,8 @@ def extract_duration_like(text):
         return match.group(1).strip()
 
     match = re.search(
-        r"\d+\s*(?:hours|hour|h|小时)",
+        r"\d+\s*"
+        r"(?:hours|hour|h|小时)",
         text,
         re.I,
     )
@@ -657,11 +800,8 @@ def extract_duration_like(text):
     return ""
 
 
-# ============================================================
-# 项目信息
-# ============================================================
-
 def get_project_name(card, idx):
+
     selectors = [
         ".projects-card-title",
         "h1",
@@ -673,13 +813,14 @@ def get_project_name(card, idx):
     ]
 
     for selector in selectors:
+
         try:
-            elements = card.find_elements(
+
+            for elem in card.find_elements(
                 By.CSS_SELECTOR,
                 selector,
-            )
+            ):
 
-            for elem in elements:
                 text = element_text(elem)
 
                 if (
@@ -695,6 +836,7 @@ def get_project_name(card, idx):
             continue
 
     for line in element_text(card).splitlines():
+
         line = line.strip()
 
         if (
@@ -702,8 +844,8 @@ def get_project_name(card, idx):
             and len(line) <= 80
             and not extract_duration_like(line)
             and not re.search(
-                r"renew|reactivate|suspended|expiry|expire|valid|"
-                r"续期|重新激活|恢复|暂停|过期|到期",
+                r"renew|reactivate|suspended|expiry|"
+                r"expire|valid|续期|重新激活|恢复|暂停|过期|到期",
                 line,
                 re.I,
             )
@@ -714,6 +856,7 @@ def get_project_name(card, idx):
 
 
 def get_project_expiry(card):
+
     selectors = [
         ".projects-expiry-value",
         ".projects-service-cell--expiry strong",
@@ -725,31 +868,29 @@ def get_project_expiry(card):
 
         './/*[contains(translate(normalize-space(.), '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
-        '"abcdefghijklmnopqrstuvwxyz"), "expiry")]',
-
-
-        './/*[contains(translate(normalize-space(.), '
-        '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
-        '"abcdefghijklmnopqrstuvwxyz"), "expire")]',
-
+        '"abcdefghijklmnopqrstuvwxyz"), "expiry")]', 
 
         './/*[contains(translate(normalize-space(.), '
         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
-        '"abcdefghijklmnopqrstuvwxyz"), "valid")]',
+        '"abcdefghijklmnopqrstuvwxyz"), "expire")]', 
 
+        './/*[contains(translate(normalize-space(.), '
+        '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
+        '"abcdefghijklmnopqrstuvwxyz"), "valid")]', 
 
         './/*[contains(normalize-space(.), "过期") '
         'or contains(normalize-space(.), "到期")]',
     ]
 
     for selector in selectors:
+
         try:
-            elements = find_elements(
+
+            for elem in find_elements(
                 card,
                 selector,
-            )
+            ):
 
-            for elem in elements:
                 text = element_text(elem)
 
                 date_text = extract_date_like(text)
@@ -778,6 +919,7 @@ def get_project_expiry(card):
 
 
 def get_renewal_available_note(card):
+
     text = element_text(card)
 
     patterns = [
@@ -787,6 +929,7 @@ def get_renewal_available_note(card):
     ]
 
     for pattern in patterns:
+
         match = re.search(
             pattern,
             text,
@@ -799,7 +942,78 @@ def get_renewal_available_note(card):
     return ""
 
 
+def get_renew_note(card):
+
+    selectors = [
+        ".projects-renew-note",
+        '[class*="renew-note"]',
+        '[class*="note"]',
+        '[class*="tip"]',
+    ]
+
+    for selector in selectors:
+
+        try:
+
+            for elem in card.find_elements(
+                By.CSS_SELECTOR,
+                selector,
+            ):
+
+                text = element_text(elem)
+
+                if text:
+                    return text
+
+        except Exception:
+            continue
+
+    return "未到续期时间"
+
+
+# ============================================================
+# Renew 按钮
+# ============================================================
+
+def get_action_button_label(button):
+
+    text = element_text(button)
+
+    for attr in (
+        "aria-label",
+        "title",
+    ):
+
+        try:
+            value = (
+                button.get_attribute(attr)
+                or ""
+            ).strip()
+
+        except Exception:
+            value = ""
+
+        if value:
+            text = f"{text} {value}"
+
+    lowered = text.lower()
+
+    if (
+        "reactivate" in lowered
+        or "重新激活" in text
+        or "恢复" in text
+    ):
+        return "Reactivate"
+
+    return "Renew"
+
+
+# ============================================================
+# Renew 结果
+# ============================================================
+
 def get_card_by_index(sb, idx):
+
     cards = find_project_cards(sb)
 
     if idx <= len(cards):
@@ -808,16 +1022,18 @@ def get_card_by_index(sb, idx):
     return None
 
 
-# ============================================================
-# 续期结果
-# ============================================================
+def wait_for_renew_result(
+    sb,
+    idx,
+    timeout=30,
+):
 
-def wait_for_renew_result(sb, idx, timeout=30):
     start_time = time.time()
 
     while time.time() - start_time < timeout:
 
         try:
+
             success_modals = sb.driver.find_elements(
                 By.XPATH,
                 '//div[contains(@class, "modal") '
@@ -831,6 +1047,7 @@ def wait_for_renew_result(sb, idx, timeout=30):
                 modal.is_displayed()
                 for modal in success_modals
             ):
+
                 card = get_card_by_index(
                     sb,
                     idx,
@@ -850,12 +1067,13 @@ def wait_for_renew_result(sb, idx, timeout=30):
             )
 
             if card:
+
                 renewal_note = (
                     get_renewal_available_note(card)
                 )
 
-                renew_buttons = (
-                    find_renew_buttons(card)
+                renew_buttons = find_renew_buttons(
+                    card
                 )
 
                 if (
@@ -869,6 +1087,7 @@ def wait_for_renew_result(sb, idx, timeout=30):
                     )
 
         except Exception as e:
+
             print(
                 f"检查续期结果时暂时失败: {e}"
             )
@@ -899,102 +1118,12 @@ def wait_for_renew_result(sb, idx, timeout=30):
     )
 
 
-def get_renew_note(card):
-    selectors = [
-        ".projects-renew-note",
-        '[class*="renew-note"]',
-        '[class*="note"]',
-        '[class*="tip"]',
-    ]
-
-    for selector in selectors:
-        try:
-            elements = card.find_elements(
-                By.CSS_SELECTOR,
-                selector,
-            )
-
-            for elem in elements:
-                text = element_text(elem)
-
-                if text:
-                    return text
-
-        except Exception:
-            continue
-
-    return "未到续期时间"
-
-
-def get_action_button_label(button):
-    text = element_text(button)
-
-    for attr in (
-        "aria-label",
-        "title",
-    ):
-        try:
-            value = (
-                button.get_attribute(attr)
-                or ""
-            ).strip()
-        except Exception:
-            value = ""
-
-        if value:
-            text = f"{text} {value}"
-
-    lowered = text.lower()
-
-    if (
-        "reactivate" in lowered
-        or "重新激活" in text
-        or "恢复" in text
-    ):
-        return "Reactivate"
-
-    return "Renew"
-
-
 # ============================================================
-# 项目页诊断
-# ============================================================
-
-def log_projects_page_diagnostics(sb):
-    current_url = sb.get_current_url()
-    title = sb.get_title()
-
-    body_text = ""
-
-    try:
-        body_text = (
-            sb.driver
-            .find_element(By.TAG_NAME, "body")
-            .text
-            .strip()
-        )
-    except Exception:
-        pass
-
-    print(
-        f"项目页诊断 URL: {current_url}"
-    )
-
-    print(
-        f"项目页诊断标题: {title}"
-    )
-
-    print(
-        f"项目页可见文本摘要: "
-        f"{body_text[:1200]}"
-    )
-
-
-# ============================================================
-# 验证码
+# Anti-bot
 # ============================================================
 
 def has_renew_antibot_modal(sb):
+
     selectors = [
         '//div[contains(., "Anti-bot confirmation")]',
         '//div[contains(., "Confirm you are human")]',
@@ -1002,15 +1131,15 @@ def has_renew_antibot_modal(sb):
     ]
 
     for selector in selectors:
+
         try:
-            elements = sb.driver.find_elements(
-                By.XPATH,
-                selector,
-            )
 
             if any(
                 elem.is_displayed()
-                for elem in elements
+                for elem in sb.driver.find_elements(
+                    By.XPATH,
+                    selector,
+                )
             ):
                 return True
 
@@ -1049,7 +1178,9 @@ def click_captcha_checkbox(
     selector = None
 
     for candidate in selectors:
+
         try:
+
             sb.wait_for_element_visible(
                 candidate,
                 timeout=timeout,
@@ -1070,17 +1201,20 @@ def click_captcha_checkbox(
             break
 
         except Exception as e:
+
             last_error = e
             continue
 
     if not clicked:
+
         print(
             f"{label} 点击复选框失败: "
             f"{last_error}"
         )
+
         return False
 
-    # 等待验证码渲染
+    # 等待验证码加载
     sb.sleep(5)
 
     captcha_ok = handle_captcha_challenge(
@@ -1090,31 +1224,38 @@ def click_captcha_checkbox(
     )
 
     if not captcha_ok:
+
         print(
             f"{label} 验证流程未完成，"
             f"等待状态仍未确认。"
         )
+
         return False
 
-    # 验证复选框状态
+    # 检查是否已经勾选
     try:
+
         checked = sb.get_attribute(
             selector,
             "aria-checked",
         )
 
         if checked == "true":
+
             print(
                 f"{label} 验证通过"
             )
+
             return True
 
-        print(
-            f"{label} 验证未完成，"
-            f"当前状态: {checked}"
-        )
+        else:
 
-        return False
+            print(
+                f"{label} 验证未完成，"
+                f"当前状态: {checked}"
+            )
+
+            return False
 
     except Exception:
         return False
@@ -1130,16 +1271,15 @@ def handle_captcha_challenge(
     """
 
     start_time = time.time()
+
     challenge = None
-    last_error = None
 
     challenge_selectors = [
         ".auth-captcha-challenge",
         ".auth-capcha-challenge",
 
         '//*[contains(@class, "captcha") '
-        'and contains(@class, "challenge")]',
-
+        'and contains(@class, "challenge")]', 
 
         '//*[contains(@aria-label, "Click on ") '
         'or contains(@aria-label, "Select ") '
@@ -1151,6 +1291,7 @@ def handle_captcha_challenge(
         for selector in challenge_selectors:
 
             try:
+
                 if selector.startswith("/"):
 
                     elems = sb.driver.find_elements(
@@ -1159,6 +1300,7 @@ def handle_captcha_challenge(
                     )
 
                     for elem in elems:
+
                         if elem.is_displayed():
                             return elem
 
@@ -1175,13 +1317,15 @@ def handle_captcha_challenge(
                     ):
                         return elem
 
-            except Exception as e:
-                last_error = e
+            except Exception:
                 continue
 
         return None
 
-    # 等待验证码
+    # --------------------------------------------------------
+    # 等待挑战出现
+    # --------------------------------------------------------
+
     while (
         time.time() - start_time
         < timeout
@@ -1190,12 +1334,15 @@ def handle_captcha_challenge(
         challenge = get_challenge()
 
         if challenge:
+
             print(
                 f"{label} 检测到图形验证码挑战"
             )
+
             break
 
         try:
+
             checkbox = sb.driver.find_element(
                 By.CSS_SELECTOR,
                 'div.auth-captcha-inner[role="checkbox"]',
@@ -1207,10 +1354,12 @@ def handle_captcha_challenge(
                 )
                 == "true"
             ):
+
                 print(
                     f"{label} 验证复选框已勾选，"
                     f"验证码流程已完成"
                 )
+
                 return True
 
         except Exception:
@@ -1219,19 +1368,21 @@ def handle_captcha_challenge(
         sb.sleep(0.3)
 
     if not challenge:
+
         print(
-            f"{label} 等待验证码挑战加载超时: "
-            f"{last_error}"
+            f"{label} 等待验证码挑战加载超时"
         )
+
         return False
 
     # --------------------------------------------------------
-    # 获取目标文本
+    # 获取目标
     # --------------------------------------------------------
 
     target = ""
 
     try:
+
         prompt = challenge.find_element(
             By.CSS_SELECTOR,
             ".auth-captcha-prompt strong",
@@ -1243,7 +1394,9 @@ def handle_captcha_challenge(
         pass
 
     if not target:
+
         try:
+
             prompt = challenge.find_element(
                 By.CSS_SELECTOR,
                 ".auth-capcha-prompt strong",
@@ -1255,7 +1408,9 @@ def handle_captcha_challenge(
             pass
 
     if not target:
+
         try:
+
             aria_label = (
                 challenge.get_attribute(
                     "aria-label"
@@ -1264,11 +1419,10 @@ def handle_captcha_challenge(
             )
 
             if "Click on " in aria_label:
-                target = (
-                    aria_label
-                    .split("Click on ")[-1]
-                    .strip()
-                )
+                target = aria_label.split(
+                    "Click on ",
+                    1,
+                )[-1].strip()
 
         except Exception:
             pass
@@ -1300,39 +1454,24 @@ def handle_captcha_challenge(
                     sel.startswith(".")
                     or sel.startswith("[")
                 ):
-                    elems = (
-                        challenge_elem
-                        .find_elements(
-                            By.CSS_SELECTOR,
-                            sel,
-                        )
+                    elems = challenge_elem.find_elements(
+                        By.CSS_SELECTOR,
+                        sel,
                     )
-
                 else:
-                    elems = (
-                        challenge_elem
-                        .find_elements(
-                            By.XPATH,
-                            sel,
-                        )
+                    elems = challenge_elem.find_elements(
+                        By.XPATH,
+                        sel,
                     )
 
                 if elems:
 
-                    result = []
-
-                    for elem in elems:
-                        try:
-                            if (
-                                elem.is_displayed()
-                                and elem.is_enabled()
-                            ):
-                                result.append(elem)
-                        except Exception:
-                            continue
-
-                    if result:
-                        return result
+                    return [
+                        elem
+                        for elem in elems
+                        if elem.is_displayed()
+                        and elem.is_enabled()
+                    ]
 
             except Exception:
                 continue
@@ -1342,65 +1481,15 @@ def handle_captcha_challenge(
     options = get_options(challenge)
 
     if not options:
+
         print(
             f"{label} 未找到可点击的选项"
         )
+
         return False
 
     # --------------------------------------------------------
-    # 尝试匹配目标
-    # --------------------------------------------------------
-
-    matched = None
-
-    if target:
-
-        for opt in options:
-
-            opt_text = (
-                opt.text or ""
-            ).strip()
-
-            if not opt_text:
-
-                try:
-                    img = opt.find_element(
-                        By.TAG_NAME,
-                        "img",
-                    )
-
-                    opt_text = (
-                        img.get_attribute(
-                            "alt"
-                        )
-                        or ""
-                    ).strip()
-
-                except Exception:
-                    pass
-
-            if not opt_text:
-
-                try:
-                    opt_text = (
-                        opt.get_attribute(
-                            "aria-label"
-                        )
-                        or ""
-                    ).strip()
-
-                except Exception:
-                    pass
-
-            if (
-                target.lower()
-                in opt_text.lower()
-            ):
-                matched = opt
-                break
-
-    # --------------------------------------------------------
-    # 尝试点击
+    # 多次尝试
     # --------------------------------------------------------
 
     attempts = 0
@@ -1413,9 +1502,7 @@ def handle_captcha_challenge(
         if not challenge:
             return False
 
-        options = get_options(
-            challenge
-        )
+        options = get_options(challenge)
 
         if not options:
 
@@ -1426,19 +1513,19 @@ def handle_captcha_challenge(
 
             attempts += 1
             sb.sleep(0.8)
+
             continue
 
         current_target = ""
 
         try:
+
             prompt = challenge.find_element(
                 By.CSS_SELECTOR,
                 ".auth-captcha-prompt strong",
             )
 
-            current_target = (
-                prompt.text.strip()
-            )
+            current_target = prompt.text.strip()
 
         except Exception:
             pass
@@ -1446,6 +1533,7 @@ def handle_captcha_challenge(
         if not current_target:
 
             try:
+
                 aria_label = (
                     challenge.get_attribute(
                         "aria-label"
@@ -1454,16 +1542,22 @@ def handle_captcha_challenge(
                 )
 
                 if "Click on " in aria_label:
+
                     current_target = (
-                        aria_label
-                        .split("Click on ")[-1]
-                        .strip()
+                        aria_label.split(
+                            "Click on ",
+                            1,
+                        )[-1].strip()
                     )
 
             except Exception:
                 pass
 
         candidate = None
+
+        # ----------------------------------------------------
+        # 优先寻找目标匹配项
+        # ----------------------------------------------------
 
         if (
             target
@@ -1475,12 +1569,14 @@ def handle_captcha_challenge(
             for opt in options:
 
                 opt_text = (
-                    opt.text or ""
+                    opt.text
+                    or ""
                 ).strip()
 
                 if not opt_text:
 
                     try:
+
                         img = opt.find_element(
                             By.TAG_NAME,
                             "img",
@@ -1499,6 +1595,7 @@ def handle_captcha_challenge(
                 if not opt_text:
 
                     try:
+
                         opt_text = (
                             opt.get_attribute(
                                 "aria-label"
@@ -1513,8 +1610,13 @@ def handle_captcha_challenge(
                     target.lower()
                     in opt_text.lower()
                 ):
+
                     candidate = opt
                     break
+
+        # ----------------------------------------------------
+        # 如果找不到匹配项，沿用原来的第一个候选
+        # ----------------------------------------------------
 
         if candidate is None:
             candidate = options[0]
@@ -1531,18 +1633,23 @@ def handle_captcha_challenge(
         )
 
         if not clicked:
+
             attempts += 1
             sb.sleep(0.8)
+
             continue
 
         sb.sleep(4.5)
 
+        # ----------------------------------------------------
+        # 检查复选框
+        # ----------------------------------------------------
+
         try:
-            checkbox = (
-                sb.driver.find_element(
-                    By.CSS_SELECTOR,
-                    'div.auth-captcha-inner[role="checkbox"]',
-                )
+
+            checkbox = sb.driver.find_element(
+                By.CSS_SELECTOR,
+                'div.auth-captcha-inner[role="checkbox"]',
             )
 
             if (
@@ -1551,20 +1658,28 @@ def handle_captcha_challenge(
                 )
                 == "true"
             ):
+
                 print(
                     f"{label} 验证复选框已勾选，"
                     f"验证码流程已完成"
                 )
+
                 return True
 
         except Exception:
             pass
 
+        # ----------------------------------------------------
+        # 挑战消失也认为完成
+        # ----------------------------------------------------
+
         if not get_challenge():
+
             print(
                 f"{label} 挑战已消失，"
                 f"验证完成"
             )
+
             return True
 
         attempts += 1
@@ -1577,43 +1692,15 @@ def handle_captcha_challenge(
 
 
 # ============================================================
-# 输入框
+# 登录
 # ============================================================
-
-def mask_email(email):
-    if not email or "@" not in email:
-        return email or ""
-
-    local, domain = email.split(
-        "@",
-        1,
-    )
-
-    if len(local) <= 2:
-        masked_local = (
-            local[0] + "****"
-            if local
-            else "****"
-        )
-
-    elif len(local) <= 4:
-        masked_local = (
-            f"{local[0]}****{local[-1]}"
-        )
-
-    else:
-        masked_local = (
-            f"{local[:2]}****{local[-2:]}"
-        )
-
-    return f"{masked_local}@{domain}"
-
 
 def js_set_input_value(
     sb,
     selector,
     value,
 ):
+
     sb.execute_script(
         """
         const el =
@@ -1659,6 +1746,7 @@ def fill_input(
     label,
     timeout=15,
 ):
+
     sb.wait_for_element_visible(
         selector,
         timeout=timeout,
@@ -1670,7 +1758,9 @@ def fill_input(
     )
 
     sb.click(selector)
+
     sb.clear(selector)
+
     sb.type(
         selector,
         value,
@@ -1681,11 +1771,14 @@ def fill_input(
     )
 
     if label == "密码":
+
         print(
             f"{label}输入框当前值长度: "
             f"{len(entered_value)}"
         )
+
     else:
+
         print(
             f"{label}输入框当前值: "
             f"'{entered_value}'"
@@ -1695,7 +1788,8 @@ def fill_input(
 
         print(
             f"{label}输入未生效，"
-            f"使用 JavaScript 强制赋值并触发事件"
+            f"使用 JavaScript 强制赋值"
+            f"并触发事件"
         )
 
         js_set_input_value(
@@ -1709,11 +1803,14 @@ def fill_input(
         )
 
         if label == "密码":
+
             print(
                 f"JS 赋值后{label}长度: "
                 f"{len(entered_value)}"
             )
+
         else:
+
             print(
                 f"JS 赋值后{label}值: "
                 f"'{entered_value}'"
@@ -1722,16 +1819,19 @@ def fill_input(
     return entered_value == value
 
 
-# ============================================================
-# 登录
-# ============================================================
-
-def login(sb, email, password):
+def login(
+    sb,
+    email,
+    password,
+):
     """
-    执行登录，返回是否成功。
+    执行登录。
+    返回 True / False。
     """
 
-    print("开始登录流程...")
+    print(
+        "开始登录流程..."
+    )
 
     # --------------------------------------------------------
     # 邮箱
@@ -1763,7 +1863,7 @@ def login(sb, email, password):
         )
 
     # --------------------------------------------------------
-    # 验证码
+    # 登录验证码
     # --------------------------------------------------------
 
     captcha_ok = click_captcha_checkbox(
@@ -1772,31 +1872,36 @@ def login(sb, email, password):
     )
 
     if not captcha_ok:
+
         print(
             "⚠️ 登录验证码未完成，"
-            "暂不点击登录按钮，避免直接提交。"
+            "暂不点击登录按钮，"
+            "避免直接提交。"
         )
+
         return False
 
     sb.sleep(1)
 
     # --------------------------------------------------------
-    # 点击登录按钮
+    # 点击 Sign in
     # --------------------------------------------------------
 
     login_page_url = sb.get_current_url()
+
     clicked = False
 
-    login_selectors = [
-        'button[type="submit"]',
+    selectors = [
+        "button[type='submit']",
         "div.auth-submit-btn",
         '//button[contains(text(), "Sign in")]',
         '//div[contains(text(), "Sign in")]',
     ]
 
-    for selector in login_selectors:
+    for selector in selectors:
 
         try:
+
             sb.wait_for_element_visible(
                 selector,
                 timeout=5,
@@ -1819,6 +1924,7 @@ def login(sb, email, password):
             break
 
         except Exception as e:
+
             print(
                 f"选择器 {selector} 失败: {e}"
             )
@@ -1826,28 +1932,26 @@ def login(sb, email, password):
     if not clicked:
 
         print(
-            "所有选择器失败，使用 JS 点击"
+            "所有选择器失败，"
+            "使用 JS 点击"
         )
 
-        js_result = sb.execute_script(
+        js_clicked = sb.execute_script(
             """
             var els =
                 document.querySelectorAll(
                     'div, button, a'
                 );
 
-            for (
-                var i = 0;
-                i < els.length;
-                i++
-            ) {
-                var el = els[i];
+            for (var el of els) {
 
                 if (
                     el.textContent.trim()
-                    === "Sign in"
+                    === 'Sign in'
                 ) {
+
                     el.click();
+
                     return true;
                 }
             }
@@ -1856,13 +1960,15 @@ def login(sb, email, password):
             """
         )
 
-        if js_result:
+        if js_clicked:
             clicked = True
 
     if not clicked:
+
         print(
-            "❌ 未能点击 Sign in 按钮"
+            "❌ 无法点击 Sign in"
         )
+
         return False
 
     # --------------------------------------------------------
@@ -1871,29 +1977,57 @@ def login(sb, email, password):
 
     try:
 
-        wait_for_url_change(
-            sb,
-            login_page_url,
-            timeout=30,
+        try:
+            wait_for_url_change(
+                sb,
+                login_page_url,
+                timeout=30,
+            )
+
+        except Exception as e:
+
+            print(
+                f"URL 等待变化提示: {e}"
+            )
+
+        # ----------------------------------------------------
+        # 输出真实登录结果
+        # ----------------------------------------------------
+
+        print(
+            f"登录后 URL: "
+            f"{sb.get_current_url()}"
+        )
+
+        print(
+            f"登录后页面标题: "
+            f"{sb.get_title()}"
         )
 
         # ----------------------------------------------------
         # 新版登录成功判断
         #
-        # 不再：
-        #
-        # sb.assert_title("Home | ACLClouds")
-        #
-        # 因为网站可能返回：
-        #
-        # Home | ACLClouds
-        # Accueil | ACLClouds
+        # 不检查 title
+        # 不要求 dash.aclclouds.com
         # ----------------------------------------------------
 
-        if verify_login_success(sb):
+        if verify_login_success(
+            sb,
+            timeout=15,
+        ):
 
             print(
                 "✅ 登录成功！"
+            )
+
+            print(
+                f"登录成功 URL: "
+                f"{sb.get_current_url()}"
+            )
+
+            print(
+                f"登录成功标题: "
+                f"{sb.get_title()}"
             )
 
             return True
@@ -1905,6 +2039,7 @@ def login(sb, email, password):
         error_msg = ""
 
         try:
+
             errors = sb.driver.find_elements(
                 By.CSS_SELECTOR,
                 ".auth-error-text, "
@@ -1912,9 +2047,15 @@ def login(sb, email, password):
                 ".error-message",
             )
 
-            if errors:
+            visible_errors = [
+                error
+                for error in errors
+                if error.is_displayed()
+            ]
+
+            if visible_errors:
                 error_msg = (
-                    errors[0]
+                    visible_errors[0]
                     .text
                     .strip()
                 )
@@ -1949,7 +2090,7 @@ def login(sb, email, password):
 
 
 # ============================================================
-# 获取当前出口 IP
+# 获取出口 IP
 # ============================================================
 
 def get_current_ip(
@@ -1959,6 +2100,7 @@ def get_current_ip(
     proxies = None
 
     if proxy_server:
+
         proxies = {
             "http": proxy_server,
             "https": proxy_server,
@@ -1976,6 +2118,49 @@ def get_current_ip(
 
 
 # ============================================================
+# 邮箱脱敏
+# ============================================================
+
+def mask_email(email):
+
+    if (
+        not email
+        or "@"
+        not in email
+    ):
+        return email or ""
+
+    local, domain = email.split(
+        "@",
+        1,
+    )
+
+    if len(local) <= 2:
+
+        masked_local = (
+            local[0] + "****"
+            if local
+            else "****"
+        )
+
+    elif len(local) <= 4:
+
+        masked_local = (
+            f"{local[0]}****{local[-1]}"
+        )
+
+    else:
+
+        masked_local = (
+            f"{local[:2]}****{local[-2:]}"
+        )
+
+    return (
+        f"{masked_local}@{domain}"
+    )
+
+
+# ============================================================
 # Telegram 消息
 # ============================================================
 
@@ -1984,6 +2169,7 @@ def build_success_message(
     old_expiry,
     new_expiry,
 ):
+
     masked_email = mask_email(
         EMAIL
     )
@@ -1992,6 +2178,7 @@ def build_success_message(
         "🇫🇷 Aclclouds 续期通知",
         "",
         "✅ 续期成功",
+        f"📦 项目: {project_name}",
         f"⏱️ 新过期时间: {new_expiry}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
@@ -2004,6 +2191,7 @@ def build_not_yet_due_message(
     project_name,
     expiry,
 ):
+
     masked_email = mask_email(
         EMAIL
     )
@@ -2012,6 +2200,7 @@ def build_not_yet_due_message(
         "🇫🇷 Aclclouds 续期通知",
         "",
         "⏳ 未到续期时间",
+        f"📦 项目: {project_name}",
         f"⏱️ 当前过期时间: {expiry}",
         f"👤 登录账户: {masked_email}",
         f"⏱️ 运行时间: {beijing_time_str()}",
@@ -2026,6 +2215,7 @@ def build_unconfirmed_message(
     new_expiry,
     result_note,
 ):
+
     masked_email = mask_email(
         EMAIL
     )
@@ -2062,17 +2252,13 @@ def build_unconfirmed_message(
 
 
 # ============================================================
-# Renew 后人机验证
+# Renew 后 Anti-bot
 # ============================================================
 
 def handle_renew_antibot(
     sb,
     project_name,
 ):
-    """
-    Renew 后如果弹出 Anti-bot confirmation，
-    则点击确认。
-    """
 
     modal_selectors = [
         '//div[contains(., "Anti-bot confirmation")]',
@@ -2083,6 +2269,7 @@ def handle_renew_antibot(
     for selector in modal_selectors:
 
         try:
+
             sb.wait_for_element_visible(
                 selector,
                 timeout=5,
@@ -2112,7 +2299,50 @@ def handle_renew_antibot(
 
 
 # ============================================================
-# 主程序
+# 项目页诊断
+# ============================================================
+
+def log_projects_page_diagnostics(sb):
+
+    current_url = sb.get_current_url()
+
+    title = sb.get_title()
+
+    body_text = ""
+
+    try:
+
+        body_text = (
+            sb.driver
+            .find_element(
+                By.TAG_NAME,
+                "body",
+            )
+            .text
+            .strip()
+        )
+
+    except Exception:
+        pass
+
+    print(
+        f"项目页诊断 URL: "
+        f"{current_url}"
+    )
+
+    print(
+        f"项目页诊断标题: "
+        f"{title}"
+    )
+
+    print(
+        "项目页可见文本摘要: "
+        f"{body_text[:1200]}"
+    )
+
+
+# ============================================================
+# MAIN
 # ============================================================
 
 def main():
@@ -2130,10 +2360,10 @@ def main():
     PROXY_SERVER = (
         os.getenv("S5_PROXY")
         or os.getenv("PROXY_SERVER")
-        or "socks://127.0.0.1:1080"
+        or "socks5://127.0.0.1:1080"
     )
 
-    # SeleniumBase
+    # SeleniumBase 配置
     sb_options = {
         "uc": True,
         "headless": False,
@@ -2141,9 +2371,7 @@ def main():
 
     if IS_PROXY:
 
-        sb_options["proxy"] = (
-            PROXY_SERVER
-        )
+        sb_options["proxy"] = PROXY_SERVER
 
         print(
             f"🔗 挂载代理: "
@@ -2158,7 +2386,12 @@ def main():
 
     with SB(**sb_options) as sb:
 
+        # ----------------------------------------------------
+        # 获取当前出口 IP
+        # ----------------------------------------------------
+
         try:
+
             ip = get_current_ip(
                 PROXY_SERVER
                 if IS_PROXY
@@ -2185,7 +2418,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 打开网站
+        # 打开首页
         # ----------------------------------------------------
 
         if not is_login_page(sb):
@@ -2206,7 +2439,10 @@ def main():
                 "执行正常登录..."
             )
 
-            if not EMAIL or not PASSWORD:
+            if (
+                not EMAIL
+                or not PASSWORD
+            ):
 
                 print(
                     "❌ 未配置 EMAIL 或 PASSWORD，"
@@ -2224,6 +2460,7 @@ def main():
                 EMAIL,
                 PASSWORD,
             ):
+
                 return
 
         # ----------------------------------------------------
@@ -2239,14 +2476,20 @@ def main():
             )
 
         # ----------------------------------------------------
-        # 无法确认登录状态
+        # 无法确认登录
         # ----------------------------------------------------
 
         else:
 
             print(
-                f"❌ 未能确认登录状态。"
-                f"URL: {sb.get_current_url()}，"
+                "❌ 未能确认登录状态。"
+            )
+
+            print(
+                f"URL: {sb.get_current_url()}"
+            )
+
+            print(
                 f"标题: {sb.get_title()}"
             )
 
@@ -2258,24 +2501,52 @@ def main():
             return
 
         # ====================================================
-        # 进入项目页
+        # 2. 登录成功后进入项目页
         # ====================================================
 
+        projects_url = get_projects_url(sb)
+
         print(
-            f"进入项目页: "
-            f"{PROJECTS_URL}"
+            f"📍 准备进入项目页: "
+            f"{projects_url}"
         )
 
-        sb.open(
-            PROJECTS_URL
-        )
+        sb.open(projects_url)
 
         sb.wait_for_ready_state_complete()
 
         time.sleep(3)
 
+        print(
+            f"📍 当前项目页 URL: "
+            f"{sb.get_current_url()}"
+        )
+
+        print(
+            f"📄 当前项目页标题: "
+            f"{sb.get_title()}"
+        )
+
+        # ----------------------------------------------------
+        # 如果项目页被重新定向回登录页
+        # ----------------------------------------------------
+
+        if is_login_page(sb):
+
+            print(
+                "❌ 进入项目页后又回到了登录页面，"
+                "登录 Cookie 可能没有保持。"
+            )
+
+            send_telegram(
+                "⚠️ 登录成功后进入项目页时"
+                "又被重定向到登录页面。"
+            )
+
+            return
+
         # ====================================================
-        # 定位项目卡片
+        # 3. 定位项目卡片
         # ====================================================
 
         cards = find_project_cards(sb)
@@ -2302,7 +2573,7 @@ def main():
         )
 
         # ====================================================
-        # 逐个处理项目
+        # 4. 逐个项目处理
         # ====================================================
 
         for idx, card in enumerate(
@@ -2312,13 +2583,17 @@ def main():
 
             try:
 
-                project_name = get_project_name(
-                    card,
-                    idx,
+                project_name = (
+                    get_project_name(
+                        card,
+                        idx,
+                    )
                 )
 
-                old_expiry = get_project_expiry(
-                    card
+                old_expiry = (
+                    get_project_expiry(
+                        card
+                    )
                 )
 
                 print(
@@ -2327,11 +2602,13 @@ def main():
                 )
 
                 # ------------------------------------------------
-                # 查找 Renew 按钮
+                # 查找 Renew / Reactivate
                 # ------------------------------------------------
 
-                renew_btn = find_renew_buttons(
-                    card
+                renew_btn = (
+                    find_renew_buttons(
+                        card
+                    )
                 )
 
                 if renew_btn:
@@ -2353,14 +2630,13 @@ def main():
 
                         print(
                             f"[{project_name}] "
-                            f"❌ 点击 {action_label} "
-                            f"按钮失败"
+                            f"点击 {action_label} 失败"
                         )
 
                         send_telegram(
                             f"🇫🇷 Aclclouds 续期通知\n\n"
-                            f"❌ {project_name} "
-                            f"{action_label} 按钮点击失败"
+                            f"⚠️ 项目 {project_name} "
+                            f"点击 {action_label} 失败"
                         )
 
                         continue
@@ -2371,7 +2647,7 @@ def main():
                     )
 
                     # ------------------------------------------------
-                    # 处理续期人机验证
+                    # Renew 后处理 Anti-bot
                     # ------------------------------------------------
 
                     handle_renew_antibot(
@@ -2413,7 +2689,8 @@ def main():
 
                         print(
                             f"[{project_name}] "
-                            f"续期状态未确认"
+                            f"续期状态未确认。"
+                            f"当前过期: {new_expiry}"
                         )
 
                         send_telegram(
@@ -2425,11 +2702,11 @@ def main():
                             )
                         )
 
-                # ------------------------------------------------
-                # 没有 Renew 按钮
-                # ------------------------------------------------
-
                 else:
+
+                    # ------------------------------------------------
+                    # 没有 Renew 按钮
+                    # ------------------------------------------------
 
                     note = get_renew_note(
                         card
@@ -2450,12 +2727,11 @@ def main():
             except Exception as e:
 
                 print(
-                    f"处理卡片 {idx} 出错: "
-                    f"{e}"
+                    f"处理卡片 {idx} 出错: {e}"
                 )
 
                 send_telegram(
-                    f"🇫🇷 Aclclouds 续期通知\n\n"
+                    "🇫🇷 Aclclouds 续期通知\n\n"
                     f"⚠️ 处理出错: {str(e)}"
                 )
 
