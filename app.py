@@ -510,7 +510,9 @@ def find_project_cards(sb):
             for card in sb.driver.find_elements(By.CSS_SELECTOR, selector):
                 if shown(card) and len(text_of(card)) >= 5 and any(word in normalize(text_of(card)) for word in ACTION_WORDS):
                     cards.append(card)
-        except Exception:
+        except Exception as exc:
+            if "Connection refused" in str(exc):
+                raise
             continue
     # 法语页目前只有 Gérer / Modifier / Supprimer 时，以上条件仍能识别。
     for xpath in (action_xpath(("manage", "gérer", "gerer", "管理")), action_xpath(("edit", "delete", "modifier", "supprimer", "修改", "删除"))):
@@ -518,7 +520,9 @@ def find_project_cards(sb):
             for control in sb.driver.find_elements(By.XPATH, xpath):
                 if shown(control):
                     cards.append(card_from_child(sb, control))
-        except Exception:
+        except Exception as exc:
+            if "Connection refused" in str(exc):
+                raise
             continue
     return dedupe_project_cards(cards)
 
@@ -549,10 +553,19 @@ def renew_projects(sb):
     projects_url = current_base(sb) + PROJECTS_PATH
     log(f"📍 准备进入项目页: {projects_url}")
     sb.open(projects_url)
+    # 与原脚本一致：项目页为前端动态页面，先等待 document ready，避免
+    # 刚导航完成就开始读取卡片时 UC/ChromeDriver 会话被提前关闭。
+    sb.wait_for_ready_state_complete()
     time.sleep(2)
     log(f"📍 当前项目页 URL: {sb.get_current_url()}")
     log(f"📄 当前项目页标题: {sb.get_title()}")
-    cards = find_project_cards(sb)
+    try:
+        cards = find_project_cards(sb)
+    except (WebDriverException, requests.exceptions.RequestException) as exc:
+        raise RuntimeError(
+            "浏览器驱动在读取项目页时已断开。请保留本次工作流日志中的 Chrome/ChromeDriver 输出，"
+            f"具体错误: {exc}"
+        ) from exc
     if not cards:
         excerpt = text_of(sb.driver.find_element(By.TAG_NAME, "body"))[:1200]
         log("❌ 未找到项目卡片。")
