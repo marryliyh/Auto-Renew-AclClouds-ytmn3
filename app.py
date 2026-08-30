@@ -19,7 +19,7 @@ import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from selenium.common.exceptions import (
@@ -561,6 +561,44 @@ def find_renew_buttons(card):
     return [element for element in unique(result) if shown(element)]
 
 
+def find_manage_link(card):
+    """在服务列表卡片中找到法语/英文/中文的管理入口。"""
+    xpath = action_xpath(("manage", "gérer", "gerer", "管理"))
+    try:
+        for element in card.find_elements(By.XPATH, xpath):
+            if shown(element):
+                return element
+    except Exception:
+        pass
+    return None
+
+
+def open_manage_page(sb, card, project_name):
+    control = find_manage_link(card)
+    if not control:
+        return False
+    try:
+        href = (control.get_attribute("href") or "").strip()
+    except Exception:
+        href = ""
+    try:
+        if href:
+            target_url = urljoin(sb.get_current_url(), href)
+            log(f"[{project_name}] 进入管理页: {target_url}")
+            sb.open(target_url)
+        else:
+            if not safe_click(sb, control, f"[{project_name}] Gérer/Manage"):
+                return False
+        sb.wait_for_ready_state_complete()
+        time.sleep(2)
+        log(f"[{project_name}] 管理页 URL: {sb.get_current_url()}")
+        log(f"[{project_name}] 管理页标题: {sb.get_title()}")
+        return True
+    except Exception as exc:
+        log(f"[{project_name}] 无法进入管理页: {exc}")
+        return False
+
+
 def log_service_button_diagnostics(card, project_name):
     """未找到续期按钮时，输出服务容器及祖先容器内图标按钮的可访问属性。"""
     try:
@@ -639,6 +677,9 @@ def renew_projects(sb):
         # 反推到的容器有时只是服务的操作栏；此时在项目页全局再找一次
         # 带有“续期/重新激活”语义属性的图标按钮。
         if not buttons:
+            buttons = find_renew_buttons(sb.driver)
+        # 列表页只提供 Gérer / Modifier / Supprimer 时，续期操作位于管理详情页。
+        if not buttons and open_manage_page(sb, card, name):
             buttons = find_renew_buttons(sb.driver)
         log(f"[{name}] 当前过期: {expiry}")
         if not buttons:
