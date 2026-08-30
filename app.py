@@ -420,14 +420,26 @@ def action_xpath(words):
 
 def card_from_child(sb, child):
     return sb.driver.execute_script("""
+        const action = /^(?:manage|edit|delete|renew|reactivate|gérer|gerer|modifier|supprimer|renouveler|réactiver|reactiver|管理|修改|删除|续期|重新激活|恢复)$/i;
         let node = arguments[0];
+        let best = null;
+        let bestScore = -1;
         for (let i = 0; node && i < 12; i++, node = node.parentElement) {
           const cls = String(node.className || '').toLowerCase();
           const text = String(node.innerText || '').trim();
+          const lines = text.split(/\\n+/).map(value => value.trim()).filter(Boolean);
+          const hasName = lines.some(value => value.length <= 100 && !action.test(value));
           const buttons = node.querySelectorAll('button,a,[role="button"]').length;
-          if (i > 0 && text.length >= 5 && buttons > 0 && /card|project|service|server|item|row|grid/.test(cls)) return node;
+          if (i > 0 && text.length >= 5 && buttons > 0) {
+            let score = 0;
+            if (/card|project|service|server/.test(cls)) score += 8;
+            if (/item|row|grid/.test(cls)) score += 3;
+            if (hasName) score += 12;
+            score += Math.min(text.length, 500) / 100;
+            if (score > bestScore) { best = node; bestScore = score; }
+          }
         }
-        return arguments[0].parentElement;
+        return best || arguments[0].parentElement || arguments[0];
     """, child)
 
 
