@@ -318,8 +318,11 @@ def handle_captcha_challenge(sb, label="验证码", timeout=30):
         log(f"{label} 点击候选选项 #{attempt + 1} ...")
         safe_click(sb, candidate, f"{label} 选项候选")
         time.sleep(4.5)
+    if captcha_is_checked(sb):
+        log(f"{label} 验证复选框已勾选，验证码流程已完成")
+        return True
     log(f"{label} 多次尝试后仍未完成验证码")
-    return captcha_is_checked(sb)
+    return False
 
 
 def click_captcha_checkbox(sb, label="验证码", timeout=12):
