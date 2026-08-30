@@ -40,7 +40,7 @@ EMAIL = os.getenv("EMAIL", "").strip()
 PASSWORD = os.getenv("PASSWORD", "")
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "").strip()
 TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
-PROXY = os.getenv("PROXY", "").strip()
+PROXY = (os.getenv("PROXY") or os.getenv("S5_PROXY") or os.getenv("PROXY_SERVER") or "").strip()
 LOGIN_URL = os.getenv("LOGIN_URL", "https://dash.aclclouds.com/auth/login").strip()
 HEADLESS = os.getenv("HEADLESS", "").strip().lower() in {"1", "true", "yes"}
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() in {"1", "true", "yes"}
@@ -200,32 +200,159 @@ def first_visible(driver, selectors, timeout=10):
     return None, ""
 
 
-def solve_visible_click_challenge(sb, timeout=20):
-    """处理页面上以文字候选项呈现的既有登录挑战；没有挑战时直接返回。"""
-    driver = sb.driver
-    challenge_text = " ".join(text_of(e) for e in driver.find_elements(By.CSS_SELECTOR, "body")[:1])
-    if not re.search(r"captcha|vérification|verification|验证码|challenge", challenge_text, re.I):
+def visible_first(sb, selectors, timeout=10):
+    """返回首个可见元素及其选择器；CSS 与 XPath 均支持。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for selector in selectors:
+            try:
+                by = By.XPATH if selector.startswith(("/", ".//")) else By.CSS_SELECTOR
+                for element in sb.driver.find_elements(by, selector):
+                    if shown(element):
+                        return element, selector
+            except Exception:
+                continue
+        time.sleep(0.25)
+    return None, ""
+
+
+def captcha_is_checked(sb):
+    for selector in (
+        "div.auth-captcha-inner[role='checkbox']",
+        "div.auth-capcha-inner[role='checkbox']",
+        "[role='checkbox']",
+    ):
+        try:
+            for checkbox in sb.driver.find_elements(By.CSS_SELECTOR, selector):
+                if shown(checkbox) and checkbox.get_attribute("aria-checked") == "true":
+                    return True
+        except Exception:
+            continue
+    return False
+
+
+def challenge_element(sb):
+    element, _ = visible_first(sb, (
+        ".auth-captcha-challenge", ".auth-capcha-challenge",
+        "//*[contains(@class, 'captcha') and contains(@class, 'challenge')]",
+        "//*[contains(@aria-label, 'Click on ') or contains(@aria-label, 'Select ')]",
+    ), timeout=1)
+    return element
+
+
+def challenge_target(challenge):
+    for selector in (".auth-captcha-prompt strong", ".auth-capcha-prompt strong"):
+        try:
+            value = text_of(challenge.find_element(By.CSS_SELECTOR, selector))
+            if value:
+                return value
+        except Exception:
+            continue
+    label = challenge.get_attribute("aria-label") or ""
+    match = re.search(r"(?:Click on|Select)\s+(.+)", label, re.I)
+    return match.group(1).strip() if match else ""
+
+
+def challenge_options(challenge):
+    for selector in (".auth-captcha-option", ".auth-capcha-option", ".//button", ".//a", ".//div[@role='button']"):
+        try:
+            by = By.XPATH if selector.startswith(".//") else By.CSS_SELECTOR
+            choices = [item for item in challenge.find_elements(by, selector) if shown(item) and item.is_enabled()]
+            if choices:
+                return choices
+        except Exception:
+            continue
+    return []
+
+
+def option_label(option):
+    value = text_of(option)
+    if not value:
+        for attr in ("aria-label", "title", "alt"):
+            value = (option.get_attribute(attr) or "").strip()
+            if value:
+                break
+    if not value:
+        try:
+            value = (option.find_element(By.TAG_NAME, "img").get_attribute("alt") or "").strip()
+        except Exception:
+            pass
+    return value
+
+
+def handle_captcha_challenge(sb, label="验证码", timeout=30):
+    """保留原脚本的 ACLClouds 图片候选验证码流程。"""
+    deadline = time.time() + timeout
+    challenge = None
+    while time.time() < deadline:
+        if captcha_is_checked(sb):
+            log(f"{label} 验证复选框已勾选，验证码流程已完成")
+            return True
+        challenge = challenge_element(sb)
+        if challenge:
+            log(f"{label} 检测到图形验证码挑战")
+            break
+        time.sleep(0.3)
+    if not challenge:
+        log(f"{label} 等待验证码挑战加载超时")
+        return False
+
+    initial_target = challenge_target(challenge)
+    log(f"{label} 目标文本: {initial_target or '未识别'}")
+    for attempt in range(8):
+        if captcha_is_checked(sb):
+            log(f"{label} 验证复选框已勾选，验证码流程已完成")
+            return True
+        challenge = challenge_element(sb)
+        if not challenge:
+            # 组件消失也可能表示验证完成；以 checkbox 状态再确认一次。
+            time.sleep(0.5)
+            return captcha_is_checked(sb)
+        target = challenge_target(challenge) or initial_target
+        options = challenge_options(challenge)
+        if not options:
+            log(f"{label} 当前挑战没有可点击选项，重试中...")
+            time.sleep(0.8)
+            continue
+        candidate = next((item for item in options if target and target.casefold() in option_label(item).casefold()), options[0])
+        log(f"{label} 点击候选选项 #{attempt + 1} ...")
+        safe_click(sb, candidate, f"{label} 选项候选")
+        time.sleep(4.5)
+    log(f"{label} 多次尝试后仍未完成验证码")
+    return captcha_is_checked(sb)
+
+
+def click_captcha_checkbox(sb, label="验证码", timeout=12):
+    checkbox, selector = visible_first(sb, (
+        "div.auth-captcha-inner[role='checkbox']",
+        "div.auth-capcha-inner[role='checkbox']",
+        "//div[contains(., 'Anti-bot confirmation')]//*[@role='checkbox']",
+        "//div[contains(., 'I am not a robot')]//*[@role='checkbox']",
+        "//div[contains(@class, 'modal') and contains(., 'Secured by ACLClouds')]//*[@role='checkbox']",
+    ), timeout=timeout)
+    if not checkbox:
+        log(f"{label} 未找到人机验证复选框")
+        return False
+    if captcha_is_checked(sb):
         return True
-    log("登录验证码 检测到图形/文字验证码挑战")
-    # 只使用页面已暴露的可访问文本，不尝试绕过外部 CAPTCHA 服务。
-    labels = driver.find_elements(By.CSS_SELECTOR, "label, button, [role='button'], [role='checkbox']")
-    targets = [text_of(e) for e in labels if shown(e) and text_of(e)]
-    prompt = " ".join(targets[:20])
-    target_match = re.search(r"(?:select|choose|click|点击|选择).*?[:：]\s*([^\n,.;]{2,40})", prompt, re.I)
-    if not target_match:
-        log("登录验证码 未识别到可访问的目标文本；请在浏览器中人工完成验证码。")
+    try:
+        # 原脚本在这个控件上使用 uc_click；它比普通 WebDriver 点击更适合该站的挑战组件。
+        if not selector.startswith("/"):
+            sb.uc_click(selector)
+        elif not safe_click(sb, checkbox, label):
+            return False
+    except Exception as exc:
+        log(f"{label} UC 点击失败，改用普通点击: {exc}")
+        if not safe_click(sb, checkbox, label):
+            return False
+    time.sleep(5)
+    if not handle_captcha_challenge(sb, label):
+        return False
+    if captcha_is_checked(sb):
+        log(f"{label} 验证通过")
         return True
-    target = normalize(target_match.group(1))
-    log(f"登录验证码 目标文本: {target_match.group(1).strip()}")
-    clicked = 0
-    for candidate in labels:
-        value = normalize(text_of(candidate))
-        if value and (value == target or target in value):
-            if safe_click(sb, candidate, f"验证码候选项 #{clicked + 1}"):
-                clicked += 1
-    if clicked:
-        time.sleep(1)
-    return True
+    log(f"{label} 验证未完成")
+    return False
 
 
 def login(sb):
@@ -245,7 +372,8 @@ def login(sb):
     password.clear(); password.send_keys(PASSWORD)
     log("邮箱输入框当前值: '***'")
     log(f"密码输入框当前值长度: {len(PASSWORD)}")
-    solve_visible_click_challenge(sb)
+    if not click_captcha_checkbox(sb, "登录验证码"):
+        raise RuntimeError("登录验证码未完成，未提交登录表单。")
     submit, selector = first_visible(sb.driver, ["button[type='submit']", "input[type='submit']"])
     if not submit:
         raise RuntimeError("未找到 Sign in 登录按钮。")
@@ -439,7 +567,8 @@ def main():
     log(f"ACLClouds 续期任务开始：{now_cn()}")
     if PROXY:
         log(f"🔗 挂载代理: {PROXY}")
-    options = {"headless": HEADLESS}
+    # 与原脚本一致，使用 SeleniumBase 的 UC 浏览器模式。
+    options = {"uc": True, "headless": HEADLESS}
     if PROXY:
         options["proxy"] = PROXY
     try:
