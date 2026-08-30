@@ -265,11 +265,16 @@ def extract_duration_like(text):
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
         # 支持英文 expires in / time remaining / 法语 expire dans / reste / restant / 中文
-        if re.search(r'expires?\s*(?:in|dans)|time\s+remaining|temps\s+restant|reste|restant|剩余|还有', line, re.I) and idx + 1 < len(lines):
-            candidate = lines[idx + 1]
-            if extract_date_like(candidate) or re.search(r'\d', candidate):
-                # “Expires in / Expire dans / Time remaining”标签单独占一行，时长值在下一行，去掉标签只保留数值
-                return re.sub(r'^(?:expires?\s*(?:in|dans)?|time\s*remaining|temps\s*restant|reste|restant|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
+        if re.search(r'expires?\s*(?:in|dans)|time\s+remaining|temps\s+restant|reste|restant|剩余|还有', line, re.I):
+            # 优先：标签和值在同一行，如 "Time remaining: 2d 18h"
+            inline = re.sub(r'^(?:expires?\s*(?:in|dans)?|time\s*remaining|temps\s*restant|reste|restant|剩余|还有)\s*[:：]?\s*', '', line, flags=re.I).strip()
+            if inline and re.search(r'\d', inline):
+                return inline
+            # 次选：标签单独一行，值在下一行
+            if idx + 1 < len(lines):
+                candidate = lines[idx + 1]
+                if extract_date_like(candidate) or re.search(r'\d', candidate):
+                    return re.sub(r'^(?:expires?\s*(?:in|dans)?|time\s*remaining|temps\s*restant|reste|restant|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
 
     # 英文/法文/中文时长：2 jours / 15 heures / 3 days / 5 hours / 2d 18h / 2d3h / 2天3小时 / 3 j / 5 h
     match = re.search(
@@ -389,6 +394,19 @@ def get_project_expiry(card):
             print(f"| {line}")
     print("===== 卡片文本诊断结束 =====")
     return '未知'
+
+def card_diag_text(card):
+    """把卡片内所有可见文本行合并成诊断字符串，便于发送到 Telegram 排查。"""
+    try:
+        lines = []
+        for line in element_text(card).splitlines():
+            line = line.strip()
+            if line:
+                lines.append(line)
+        return "\n".join(lines) if lines else "(卡片文本为空)"
+    except Exception as e:
+        return f"(卡片文本获取失败: {e})"
+
 
 def get_renewal_available_note(card):
     text = element_text(card)
@@ -1000,7 +1018,15 @@ def main():
                 else:
                     note = get_renew_note(card)
                     print(f"无 Renew 按钮，提示: {note}")
-                    send_telegram(build_not_yet_due_message(project_name, old_expiry))
+                    if old_expiry == '未知':
+                        # 过期时间解析失败时把卡片文本一并发到 Telegram 便于排查
+                        diag = card_diag_text(card)
+                        print("===== 卡片文本诊断（未解析到过期时间）=====")
+                        print(diag)
+                        print("===== 卡片文本诊断结束 =====")
+                        send_telegram(build_not_yet_due_message(project_name, old_expiry) + "\n\n📋 卡片诊断:\n" + diag)
+                    else:
+                        send_telegram(build_not_yet_due_message(project_name, old_expiry))
             except Exception as e:
                 print(f"处理卡片 {idx} 出错: {e}")
                 send_telegram(f"🇫🇷 Aclclouds 续期通知\n\n⚠️ 处理出错: {str(e)}")
