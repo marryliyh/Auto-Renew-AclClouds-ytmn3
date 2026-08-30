@@ -631,6 +631,29 @@ def log_service_button_diagnostics(card, project_name):
         log(f"[{project_name}] 无法读取续期按钮诊断: {exc}")
 
 
+def log_current_page_button_diagnostics(sb, project_name):
+    """详情页使用当前 document，而不是已失效的列表卡片元素。"""
+    try:
+        rows = sb.driver.execute_script("""
+            return Array.from(document.querySelectorAll('button,a,[role="button"]'))
+              .filter(el => {
+                const s = getComputedStyle(el);
+                return s.display !== 'none' && s.visibility !== 'hidden';
+              })
+              .slice(0, 60)
+              .map(el => ({
+                tag: el.tagName.toLowerCase(), text: (el.innerText || '').trim(),
+                title: el.getAttribute('title') || '', aria: el.getAttribute('aria-label') || '',
+                tooltip: el.getAttribute('data-tooltip') || '', action: el.getAttribute('data-action') || '',
+                testid: el.getAttribute('data-testid') || '', cls: String(el.className || ''),
+                href: el.getAttribute('href') || ''
+              }));
+        """)
+        log(f"[{project_name}] 管理页按钮诊断: {rows}")
+    except Exception as exc:
+        log(f"[{project_name}] 无法读取管理页按钮诊断: {exc}")
+
+
 def wait_for_renew_result(sb, before_expiry, timeout=25):
     success_words = ("success", "renewed", "reactivated", "succès", "renouvelé", "réactivé", "成功", "续期成功")
     deadline = time.time() + timeout
@@ -679,11 +702,16 @@ def renew_projects(sb):
         if not buttons:
             buttons = find_renew_buttons(sb.driver)
         # 列表页只提供 Gérer / Modifier / Supprimer 时，续期操作位于管理详情页。
+        opened_manage_page = False
         if not buttons and open_manage_page(sb, card, name):
+            opened_manage_page = True
             buttons = find_renew_buttons(sb.driver)
         log(f"[{name}] 当前过期: {expiry}")
         if not buttons:
-            log_service_button_diagnostics(card, name)
+            if opened_manage_page:
+                log_current_page_button_diagnostics(sb, name)
+            else:
+                log_service_button_diagnostics(card, name)
             outcomes.append(f"{name}: 无可用续期按钮")
             continue
         if DRY_RUN:
