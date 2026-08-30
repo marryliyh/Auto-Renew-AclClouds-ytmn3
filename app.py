@@ -563,10 +563,10 @@ def find_renew_buttons(card):
 
 def find_manage_link(card):
     """在服务列表卡片中找到法语/英文/中文的管理入口。"""
-    xpath = action_xpath(("manage", "gérer", "gerer", "管理"))
     try:
-        for element in card.find_elements(By.XPATH, xpath):
-            if shown(element):
+        # 站点实际结构：<a class="... projects-service-action">Gérer</a>
+        for element in card.find_elements(By.CSS_SELECTOR, "a.projects-service-action, a[href]"):
+            if shown(element) and normalize(text_of(element)) in {"gérer", "gerer", "manage", "管理"}:
                 return element
     except Exception:
         pass
