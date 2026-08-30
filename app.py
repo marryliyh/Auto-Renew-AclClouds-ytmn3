@@ -32,7 +32,7 @@ TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""
 
 LOGIN_PATH = "/auth/login"
 
-BASE_URL = "https://dash.aclclouds.com/en"
+BASE_URL = "https://dash.aclclouds.com/"
 PROJECTS_URL = f"{BASE_URL}/dashboard/projects"
 
 
