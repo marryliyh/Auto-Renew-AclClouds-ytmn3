@@ -197,6 +197,20 @@ def find_card_container_from_child(sb, child):
         child,
     )
 
+def is_page_level_container(text):
+    """判断元素是否为页面级容器（导航/页脚），而非服务卡片。"""
+    markers = [
+        'menu', 'accueil', 'mes services', 'parrainage', 'commandes',
+        'conditions d', 'confidentialit', 'tous droits',
+        'commander un service', 'connecter', 'login',
+        'installe le panel', 'fermer', 'installer',
+        '© ', 'cookies',
+    ]
+    low = text.lower()
+    hits = sum(1 for m in markers if m in low)
+    return hits >= 2 or len(text) > 600
+
+
 def find_project_cards(sb):
     candidate_selectors = [
         '.projects-card',
@@ -211,9 +225,40 @@ def find_project_cards(sb):
     for selector in candidate_selectors:
         try:
             for card in sb.driver.find_elements(By.CSS_SELECTOR, selector):
-                text = element_text(card).lower()
-                if any(keyword in text for keyword in ['renew', 'reactivate', 'suspended', 'expiry', 'expire', 'valid', '续期', '重新激活', '恢复', '暂停', '过期', '到期']):
+                text = element_text(card)
+                if not text:
+                    continue
+                # 跳过整页容器（导航/页脚），只保留真正的服务卡片
+                if is_page_level_container(text):
+                    continue
+                low = text.lower()
+                if any(keyword in low for keyword in ['renew', 'reactivate', 'suspended', 'expiry', 'expire', 'valid', 'time remaining', 'temps restant', 'gérer', 'gerer', 'modifier', 'supprimer', 'manage', 'edit', 'delete', '续期', '重新激活', '恢复', '暂停', '过期', '到期']):
                     cards.append(card)
+        except Exception:
+            continue
+
+    if cards:
+        return dedupe_project_cards(cards)
+
+    # 通过操作按钮反查卡片容器（法语 Gérer/Modifier/Supprimer，英文 Manage/Edit/Delete）
+    action_xpath = (
+        '//*['
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÉÈÇ", "abcdefghijklmnopqrstuvwxyzàéèç"), "gérer") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÉÈÇ", "abcdefghijklmnopqrstuvwxyzàéèç"), "gerer") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "manage") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "modifier") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "supprimer") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "edit") or '
+        'contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "delete")'
+        ' and not(self::body) and not(self::html)]'
+    )
+    for elem in sb.driver.find_elements(By.XPATH, action_xpath):
+        try:
+            if len(element_text(elem)) > 600:
+                continue
+            card = find_card_container_from_child(sb, elem)
+            if card is not None and not is_page_level_container(element_text(card)):
+                cards.append(card)
         except Exception:
             continue
 
@@ -237,11 +282,97 @@ def find_project_cards(sb):
     )
     for elem in sb.driver.find_elements(By.XPATH, expiry_xpath):
         try:
-            cards.append(find_card_container_from_child(sb, elem))
+            candidate = find_card_container_from_child(sb, elem)
+            if candidate is not None and not is_page_level_container(element_text(candidate)):
+                cards.append(candidate)
         except Exception:
             continue
 
     return dedupe_project_cards(cards)
+
+def find_manage_button(card):
+    """在卡片内找详情页入口按钮（法语 Gérer / 英文 Manage / Modifier / Edit）。"""
+    selectors = [
+        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÉÈÇ", "abcdefghijklmnopqrstuvwxyzàéèç"), "gérer")]',
+        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZÀÉÈÇ", "abcdefghijklmnopqrstuvwxyzàéèç"), "gerer")]',
+        './/button[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "manage")]',
+        './/a[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "gérer") or contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "gerer") or contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "manage")]',
+        './/a[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "edit")]',
+        './/*[(@role="button" or self::a) and (contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "modifier") or contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "edit"))]',
+    ]
+    for selector in selectors:
+        try:
+            for elem in card.find_elements(By.XPATH, selector):
+                if elem.is_displayed() and elem.is_enabled():
+                    return elem
+        except Exception:
+            continue
+    return None
+
+
+def parse_expiry_from_text(text):
+    """从任意页面文本中解析过期时间。返回 (展示文本, 是否解析成功)。"""
+    if not text:
+        return '未知', False
+    date_text = extract_date_like(text)
+    if date_text:
+        return date_text, True
+    duration_text = extract_duration_like(text)
+    if duration_text:
+        return remaining_to_expiry_date(duration_text), True
+    return '未知', False
+
+
+def probe_project_detail(sb, card, project_name):
+    """点击卡片的 Gérer 进入服务详情页，解析过期时间和续期按钮。
+
+    返回 (expiry_display, renew_button_or_None, detail_diag_text)。
+    失败时返回 (None, None, None)，由调用方继续使用列表页诊断。
+    """
+    manage_btn = find_manage_button(card)
+    if manage_btn is None:
+        print(f"[{project_name}] 卡片上未找到 Gérer/Manage 按钮")
+        return None, None, None
+
+    window_before = sb.driver.current_window_handle
+    try:
+        safe_click_element(sb, manage_btn, f"[{project_name}] Gérer(详情)按钮")
+        sb.wait_for_ready_state_complete()
+        time.sleep(2)
+    except Exception as e:
+        print(f"[{project_name}] 点击详情按钮失败: {e}")
+        return None, None, None
+
+    # 若按钮在新标签页打开，切换到新窗口
+    try:
+        handles = sb.driver.window_handles
+        if len(handles) > 1:
+            for handle in handles:
+                if handle != window_before:
+                    sb.driver.switch_to.window(handle)
+                    break
+            time.sleep(2)
+    except Exception:
+        pass
+
+    detail_text = ''
+    try:
+        detail_text = sb.driver.find_element(By.TAG_NAME, 'body').text.strip()
+    except Exception:
+        pass
+
+    expiry_display, _ = parse_expiry_from_text(detail_text)
+    renew_btn = None
+    try:
+        renew_btn = find_renew_buttons(sb.driver)
+    except Exception:
+        pass
+    renew_btn = renew_btn or None
+
+    diag_lines = [line.strip() for line in detail_text.splitlines() if line.strip()]
+    detail_diag = "\n".join(diag_lines)[:1500]
+    return expiry_display, renew_btn, detail_diag
+
 
 def extract_date_like(text):
     if not text:
@@ -1019,12 +1150,54 @@ def main():
                     note = get_renew_note(card)
                     print(f"无 Renew 按钮，提示: {note}")
                     if old_expiry == '未知':
-                        # 过期时间解析失败时把卡片文本一并发到 Telegram 便于排查
-                        diag = card_diag_text(card)
-                        print("===== 卡片文本诊断（未解析到过期时间）=====")
-                        print(diag)
-                        print("===== 卡片文本诊断结束 =====")
-                        send_telegram(build_not_yet_due_message(project_name, old_expiry) + "\n\n📋 卡片诊断:\n" + diag)
+                        # 列表页卡片上没有过期时间 → 尝试进入 Gérer 详情页解析
+                        detail_expiry, detail_renew, detail_diag = probe_project_detail(sb, card, project_name)
+
+                        # 探测结束后回到项目列表页，关闭额外标签页，避免影响后续卡片
+                        try:
+                            if len(sb.driver.window_handles) > 1:
+                                for handle in sb.driver.window_handles[1:]:
+                                    try:
+                                        sb.driver.switch_to.window(handle)
+                                        sb.driver.close()
+                                    except Exception:
+                                        pass
+                                sb.driver.switch_to.window(sb.driver.window_handles[0])
+                            sb.open(PROJECTS_URL)
+                            sb.wait_for_ready_state_complete()
+                            time.sleep(2)
+                        except Exception:
+                            try:
+                                sb.open(PROJECTS_URL)
+                                sb.wait_for_ready_state_complete()
+                                time.sleep(2)
+                            except Exception:
+                                pass
+
+                        if detail_expiry and detail_expiry != '未知':
+                            old_expiry = detail_expiry
+                            print(f"[{project_name}] 详情页解析到过期时间: {old_expiry}")
+                            if detail_renew:
+                                action_label = get_action_button_label(detail_renew[0])
+                                safe_click_element(sb, detail_renew[0], f"[{project_name}] {action_label}按钮")
+                                print(f"[{project_name}] 点击 {action_label}...")
+                                handle_renew_antibot(sb, project_name)
+                                success, new_expiry, result_note = wait_for_renew_result(sb, idx, timeout=30)
+                                if success:
+                                    print(f"续期成功！状态: {result_note}，新过期: {new_expiry}")
+                                    send_telegram(build_success_message(project_name, old_expiry, new_expiry))
+                                else:
+                                    send_telegram(build_unconfirmed_message(project_name, old_expiry, new_expiry, result_note))
+                            else:
+                                send_telegram(build_not_yet_due_message(project_name, old_expiry))
+                        else:
+                            # 详情页也没有解析出来 → 发列表页 + 详情页双重诊断
+                            diag = card_diag_text(card)
+                            print("===== 卡片文本诊断（未解析到过期时间）=====")
+                            print(diag)
+                            print("===== 卡片文本诊断结束 =====")
+                            extra = f"\n\n📋 详情页诊断:\n{detail_diag[:800]}" if detail_diag else ""
+                            send_telegram(build_not_yet_due_message(project_name, old_expiry) + "\n\n📋 卡片诊断:\n" + diag + extra)
                     else:
                         send_telegram(build_not_yet_due_message(project_name, old_expiry))
             except Exception as e:
