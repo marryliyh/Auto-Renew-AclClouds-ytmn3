@@ -351,7 +351,16 @@ def get_project_expiry(card):
             continue
 
     card_text = element_text(card)
-    return extract_date_like(card_text) or extract_duration_like(card_text) or '未知'
+    found = extract_date_like(card_text) or extract_duration_like(card_text)
+    if not found:
+        # 诊断：把卡片里所有文本行打出来，方便定位过期时间字段
+        print("===== 卡片文本诊断（未解析到过期时间）=====")
+        for line in card_text.splitlines():
+            line = line.strip()
+            if line:
+                print(f"| {line}")
+        print("===== 卡片文本诊断结束 =====")
+    return found or '未知'
 
 def get_renewal_available_note(card):
     text = element_text(card)
