@@ -264,14 +264,14 @@ def extract_duration_like(text):
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
-        # 支持英文 expires in / 法语 expire dans / reste / restant / 中文
-        if re.search(r'expires?\s*(?:in|dans)|reste|restant|剩余|还有', line, re.I) and idx + 1 < len(lines):
+        # 支持英文 expires in / time remaining / 法语 expire dans / reste / restant / 中文
+        if re.search(r'expires?\s*(?:in|dans)|time\s+remaining|temps\s+restant|reste|restant|剩余|还有', line, re.I) and idx + 1 < len(lines):
             candidate = lines[idx + 1]
             if extract_date_like(candidate) or re.search(r'\d', candidate):
-                # “Expires in / Expire dans”标签单独占一行，时长值在下一行，去掉标签只保留数值
-                return re.sub(r'^(?:expires?\s*(?:in|dans)?|reste|restant|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
+                # “Expires in / Expire dans / Time remaining”标签单独占一行，时长值在下一行，去掉标签只保留数值
+                return re.sub(r'^(?:expires?\s*(?:in|dans)?|time\s*remaining|temps\s*restant|reste|restant|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
 
-    # 英文/法文/中文时长：2 jours / 15 heures / 3 days / 5 hours / 2d3h / 2天3小时 / 3 j / 5 h
+    # 英文/法文/中文时长：2 jours / 15 heures / 3 days / 5 hours / 2d 18h / 2d3h / 2天3小时 / 3 j / 5 h
     match = re.search(
         r'(?:expires?\s*(?:in|dans)\s*)?(\d+\s*(?:jours?|heures?|days?|hours?|d|j|h|天|日|小时)\s*\d*\s*(?:heures?|hours?|h|小时)?)',
         text,
@@ -285,6 +285,31 @@ def extract_duration_like(text):
         return match.group(0).strip()
 
     return ''
+
+
+def remaining_to_expiry_date(duration_text):
+    """把 '2d 18h' / '3 days 5 hours' 这类倒计时换算为具体到期日期。
+
+    页面显示的是 Time remaining（剩余时间），换算成日期更直观。
+    返回格式: '≈ 2026-09-02 09:00（剩余 2d 18h）'；解析失败返回原文。
+    """
+    if not duration_text:
+        return ''
+    days, hours = 0, 0
+    day_match = re.search(r'(\d+)\s*(?:d|j|天|日)', duration_text, re.I)
+    hour_match = re.search(r'(\d+)\s*(?:h|小时|heures?|hours?)', duration_text, re.I)
+    if day_match:
+        days = int(day_match.group(1))
+    if hour_match:
+        hours = int(hour_match.group(1))
+    if not days and not hours:
+        return duration_text
+    try:
+        from datetime import datetime as _dt
+        expiry = _dt.now() + timedelta(days=days, hours=hours)
+        return f"≈ {expiry.strftime('%Y-%m-%d %H:%M')}（剩余 {duration_text}）"
+    except Exception:
+        return f"剩余 {duration_text}"
 
 def get_project_name(card, idx):
     selectors = [
@@ -344,7 +369,7 @@ def get_project_expiry(card):
                     return date_text
                 duration_text = extract_duration_like(text)
                 if duration_text:
-                    return duration_text
+                    return remaining_to_expiry_date(duration_text)
                 if text and len(text) <= 120:
                     return text
         except Exception:
@@ -352,15 +377,18 @@ def get_project_expiry(card):
 
     card_text = element_text(card)
     found = extract_date_like(card_text) or extract_duration_like(card_text)
-    if not found:
-        # 诊断：把卡片里所有文本行打出来，方便定位过期时间字段
-        print("===== 卡片文本诊断（未解析到过期时间）=====")
-        for line in card_text.splitlines():
-            line = line.strip()
-            if line:
-                print(f"| {line}")
-        print("===== 卡片文本诊断结束 =====")
-    return found or '未知'
+    if found:
+        if extract_date_like(card_text):
+            return extract_date_like(card_text)
+        return remaining_to_expiry_date(found)
+    # 诊断：把卡片里所有文本行打出来，方便定位过期时间字段
+    print("===== 卡片文本诊断（未解析到过期时间）=====")
+    for line in card_text.splitlines():
+        line = line.strip()
+        if line:
+            print(f"| {line}")
+    print("===== 卡片文本诊断结束 =====")
+    return '未知'
 
 def get_renewal_available_note(card):
     text = element_text(card)
