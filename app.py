@@ -359,17 +359,34 @@ def login(sb):
     if not EMAIL or not PASSWORD:
         raise RuntimeError("请设置 EMAIL 和 PASSWORD 环境变量。")
     log("开始登录流程...")
-    sb.open(LOGIN_URL)
+    # 先访问站点主页，让 ACLClouds 完成原有的重定向与前端初始化；
+    # 直接打开 /auth/login 在代理较慢时可能拿到尚未挂载表单的页面。
+    sb.open(current_base(sb))
+    sb.wait_for_ready_state_complete()
+    time.sleep(2)
+    if not is_login_url(sb.get_current_url()):
+        sb.open(LOGIN_URL)
+        sb.wait_for_ready_state_complete()
+        time.sleep(2)
+    log(f"登录页 URL: {sb.get_current_url()}")
+    log(f"登录页标题: {sb.get_title()}")
     # ACLClouds 当前登录页使用 #username / #password；其余选择器用于兼容后续页面改版。
     email, email_selector = first_visible(sb.driver, [
         "#username", "input[name='username']", "input[type='email']",
         "input[name='email']", "input[autocomplete='email']",
-    ])
+    ], timeout=30)
     password, password_selector = first_visible(sb.driver, [
         "#password", "input[type='password']", "input[name='password']",
         "input[autocomplete='current-password']",
-    ])
+    ], timeout=30)
     if not email or not password:
+        try:
+            summary = text_of(sb.driver.find_element(By.TAG_NAME, "body"))[:800]
+        except Exception:
+            summary = ""
+        log(f"登录页诊断 URL: {sb.get_current_url()}")
+        log(f"登录页诊断标题: {sb.get_title()}")
+        log(f"登录页可见文本摘要: {summary}")
         raise RuntimeError("未找到邮箱或密码输入框，请检查登录页结构。")
     email.clear(); email.send_keys(EMAIL)
     password.clear(); password.send_keys(PASSWORD)
