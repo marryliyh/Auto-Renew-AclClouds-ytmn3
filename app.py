@@ -360,11 +360,14 @@ def login(sb):
         raise RuntimeError("请设置 EMAIL 和 PASSWORD 环境变量。")
     log("开始登录流程...")
     sb.open(LOGIN_URL)
+    # ACLClouds 当前登录页使用 #username / #password；其余选择器用于兼容后续页面改版。
     email, email_selector = first_visible(sb.driver, [
-        "input[type='email']", "input[name='email']", "input[autocomplete='email']",
+        "#username", "input[name='username']", "input[type='email']",
+        "input[name='email']", "input[autocomplete='email']",
     ])
     password, password_selector = first_visible(sb.driver, [
-        "input[type='password']", "input[name='password']", "input[autocomplete='current-password']",
+        "#password", "input[type='password']", "input[name='password']",
+        "input[autocomplete='current-password']",
     ])
     if not email or not password:
         raise RuntimeError("未找到邮箱或密码输入框，请检查登录页结构。")
