@@ -249,9 +249,11 @@ def extract_date_like(text):
     patterns = [
         r'\d{4}[-/]\d{1,2}[-/]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
         r'\d{1,2}[-/]\d{1,2}[-/]\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
+        # 法语日期: 30/08/2026 à 10:00 / 30 août 2026 / 1er septembre 2026
+        r'\d{1,2}(?:er)?\s+(?:janvier|février|fevrier|mars|avril|mai|juin|juillet|août|aout|septembre|octobre|novembre|décembre|decembre)\s+\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?',
     ]
     for pattern in patterns:
-        match = re.search(pattern, text)
+        match = re.search(pattern, text, re.I)
         if match:
             return match.group(0)
     return ''
@@ -262,21 +264,23 @@ def extract_duration_like(text):
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     for idx, line in enumerate(lines):
-        if re.search(r'expires\s+in|剩余|还有', line, re.I) and idx + 1 < len(lines):
+        # 支持英文 expires in / 法语 expire dans / reste / restant / 中文
+        if re.search(r'expires?\s*(?:in|dans)|reste|restant|剩余|还有', line, re.I) and idx + 1 < len(lines):
             candidate = lines[idx + 1]
             if extract_date_like(candidate) or re.search(r'\d', candidate):
-                # “Expires in”标签单独占一行，时长值在下一行，去掉标签只保留数值
-                return re.sub(r'^(?:expires\s*in|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
+                # “Expires in / Expire dans”标签单独占一行，时长值在下一行，去掉标签只保留数值
+                return re.sub(r'^(?:expires?\s*(?:in|dans)?|reste|restant|剩余|还有)\s*[:：]?\s*', '', candidate, flags=re.I).strip()
 
+    # 英文/法文/中文时长：2 jours / 15 heures / 3 days / 5 hours / 2d3h / 2天3小时 / 3 j / 5 h
     match = re.search(
-        r'(?:expires\s*in\s*)?(\d+\s*(?:days|day|d|j|天|日)\s*\d*\s*(?:hours|hour|h|小时)?)',
+        r'(?:expires?\s*(?:in|dans)\s*)?(\d+\s*(?:jours?|heures?|days?|hours?|d|j|h|天|日|小时)\s*\d*\s*(?:heures?|hours?|h|小时)?)',
         text,
         re.I,
     )
     if match:
         return match.group(1).strip()
 
-    match = re.search(r'\d+\s*(?:hours|hour|h|小时)', text, re.I)
+    match = re.search(r'\d+\s*(?:heures?|hours?|h|小时)', text, re.I)
     if match:
         return match.group(0).strip()
 
@@ -316,10 +320,20 @@ def get_project_expiry(card):
         '[class*="expiry"]',
         '[class*="expire"]',
         '[class*="Expires"]',
+        # 法语版常见的 class / 文案
+        '[class*="expiration"]',
+        '[class*="Expiration"]',
+        '[class*="valid"]',
+        '[class*="date"]',
         './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expiry")]',
-        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expire")]',
-        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "valid")]',
-        './/*[contains(normalize-space(.), "过期") or contains(normalize-space(.), "到期")]',
+        # 法语: Expiration / expire le / valable jusqu'au / valide jusqu'au / expirera
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expiration")]',
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expire le")]',
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expire dans")]',
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "valable")]',
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "valide")]',
+        './/*[contains(translate(normalize-space(.), "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "expirera")]',
+        './/*[contains(normalize-space(.), "过期") or contains(normalize-space(.), "到期") or contains(normalize-space(.), "到期时间")]',
     ]
     for selector in selectors:
         try:
