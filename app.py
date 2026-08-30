@@ -546,11 +546,51 @@ def find_renew_buttons(card):
     words = ("renew", "reactivate", "renouveler", "réactiver", "reactiver", "续期", "重新激活", "恢复")
     result = []
     try:
-        result.extend(card.find_elements(By.CSS_SELECTOR, ".projects-renew-btn, [class*='renew'], [class*='reactivat']"))
+        # ACLClouds 法语页的续期操作可能是纯图标；文案常位于 tooltip 或 data 属性，
+        # 而非按钮的可见文字或 title/aria-label。
+        result.extend(card.find_elements(By.CSS_SELECTOR, (
+            ".projects-renew-btn, [class*='renew'], [class*='reactivat'], "
+            "[data-action*='renew'], [data-action*='reactivat'], "
+            "[data-tooltip*='renew'], [data-tooltip*='renouvel'], [data-tooltip*='réactiv'], "
+            "[data-testid*='renew'], [data-testid*='reactivat'], "
+            "[data-original-title*='renew'], [data-original-title*='renouvel']"
+        )))
         result.extend(card.find_elements(By.XPATH, action_xpath(words)))
     except Exception:
         pass
     return [element for element in unique(result) if shown(element)]
+
+
+def log_service_button_diagnostics(card, project_name):
+    """未找到续期按钮时，输出服务容器及祖先容器内图标按钮的可访问属性。"""
+    try:
+        rows = card._parent.execute_script("""
+            let node = arguments[0];
+            const seen = new Set(), out = [];
+            for (let depth = 0; node && depth < 5; depth++, node = node.parentElement) {
+              for (const button of node.querySelectorAll('button,a,[role="button"]')) {
+                if (seen.has(button)) continue;
+                seen.add(button);
+                const style = window.getComputedStyle(button);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                out.push({
+                  depth,
+                  tag: button.tagName.toLowerCase(),
+                  text: (button.innerText || '').trim(),
+                  title: button.getAttribute('title') || '',
+                  aria: button.getAttribute('aria-label') || '',
+                  tooltip: button.getAttribute('data-tooltip') || '',
+                  action: button.getAttribute('data-action') || '',
+                  testid: button.getAttribute('data-testid') || '',
+                  cls: String(button.className || '')
+                });
+              }
+            }
+            return out.slice(0, 30);
+        """, card)
+        log(f"[{project_name}] 续期按钮诊断: {rows}")
+    except Exception as exc:
+        log(f"[{project_name}] 无法读取续期按钮诊断: {exc}")
 
 
 def wait_for_renew_result(sb, before_expiry, timeout=25):
@@ -596,8 +636,13 @@ def renew_projects(sb):
         card = cards[index - 1]
         name, expiry = get_project_name(card, index), get_project_expiry(card)
         buttons = find_renew_buttons(card)
+        # 反推到的容器有时只是服务的操作栏；此时在项目页全局再找一次
+        # 带有“续期/重新激活”语义属性的图标按钮。
+        if not buttons:
+            buttons = find_renew_buttons(sb.driver)
         log(f"[{name}] 当前过期: {expiry}")
         if not buttons:
+            log_service_button_diagnostics(card, name)
             outcomes.append(f"{name}: 无可用续期按钮")
             continue
         if DRY_RUN:
